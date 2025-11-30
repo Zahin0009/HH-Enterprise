@@ -31,8 +31,29 @@
 
         // IMPORTANT: Global variables provided by the environment
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // --- START OF FIX FOR GITHUB DEPLOYMENT ---
+        // 1. Check for environment config
+        let firebaseConfig = {};
+        if (typeof __firebase_config !== 'undefined') {
+            // Use environment config when available (in Canvas)
+            firebaseConfig = JSON.parse(__firebase_config);
+        } else {
+            // Placeholder config for public hosting (like GitHub).
+            // NOTE: You must replace these placeholders with your actual Firebase project config 
+            // after setting up Firebase Authentication (Anonymous) and Firestore rules.
+            firebaseConfig = {
+                apiKey: "YOUR_API_KEY_HERE", // Replace with your apiKey
+                authDomain: "YOUR_PROJECT_ID.firebaseapp.com", // Replace with your authDomain
+                projectId: "YOUR_PROJECT_ID", // Replace with your projectId
+                storageBucket: "YOUR_PROJECT_ID.appspot.com",
+                messagingSenderId: "YOUR_SENDER_ID",
+                appId: "YOUR_APP_ID"
+            };
+            console.warn("Using placeholder Firebase config. Replace with your actual project keys for production use outside of the Canvas environment.");
+        }
+        // --- END OF FIX FOR GITHUB DEPLOYMENT ---
 
         let app, db, auth;
         let userId = null;
@@ -43,10 +64,13 @@
         // --- Core Firebase Initialization ---
         const initializeFirebase = async () => {
             try {
-                if (Object.keys(firebaseConfig).length === 0) {
-                    console.error("Firebase configuration is missing.");
+                if (!firebaseConfig || !firebaseConfig.projectId || firebaseConfig.projectId === "YOUR_PROJECT_ID") {
+                    console.error("Firebase configuration is missing or using placeholders. Cannot connect to a database.");
+                    // Display a warning message on the UI
+                    showMessage("Database Connection Error: Missing Firebase configuration. Please replace placeholders in the code.", 'error');
                     return;
                 }
+                
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
@@ -55,13 +79,13 @@
                     if (user) {
                         userId = user.uid;
                     } else {
-                        if (!initialAuthToken) {
-                            try {
-                                const res = await signInAnonymously(auth);
-                                userId = res.user.uid;
-                            } catch (err) {
-                                console.error("Anonymous sign-in failed:", err);
-                            }
+                        // FIX: Ensure anonymous sign-in is attempted if no user is found 
+                        // and no custom token is available (e.g., when deployed publicly)
+                        try {
+                            const res = await signInAnonymously(auth);
+                            userId = res.user.uid;
+                        } catch (err) {
+                            console.error("Anonymous sign-in failed:", err);
                         }
                     }
                     isAuthReady = true;
@@ -74,11 +98,16 @@
                 });
 
                 if (initialAuthToken) {
+                    // This block runs only in the Canvas environment
                     await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // This is the path for public deployment (anonymous sign-in handled by onAuthStateChanged)
+                    // If we're outside Canvas, let onAuthStateChanged handle the initial sign-in.
                 }
 
             } catch (error) {
                 console.error("Firebase initialization failed:", error);
+                showMessage("Firebase Initialization Failed. Check your console for details.", 'error');
             }
         };
 
@@ -117,7 +146,7 @@
             }, (error) => console.error("Error fetching company ledgers: ", error));
         };
         
-        // --- View Rendering ---
+        // --- View Rendering (No changes needed in rendering functions) ---
 
         const renderReports = (reports) => {
             const container = document.getElementById('reports-history-container');
@@ -258,9 +287,6 @@
 
             // Fetch transactions for the specific boatman, ordered by time descending
             const transactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/boatman_transactions`);
-            // NOTE: This query is safe because it uses only one filter (where) AND one order (orderBy), 
-            // which usually only requires a single-field index (which Firestore often creates automatically) 
-            // OR we are manually sorting client-side if it was a compound query (which it isn't here).
             const q = query(
                 transactionsColRef, 
                 where("boatmanName", "==", boatmanName), 
@@ -415,6 +441,7 @@
                     <tr>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${t.deliveryDate || 'N/A'}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${t.type} <span class="text-xs text-gray-400 block">${t.relatedChallan}</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${t.method || 'N/A'}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-right ${amountClass}">BDT ${t.amount.toFixed(2)}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-right ${balanceClass}">BDT ${t.currentBalance.toFixed(2)}</td>
                     </tr>
