@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wood Trade Financial System</title>
+    <title>Wood Trade Public Financial Ledger</title>
     <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Use Inter font family -->
@@ -26,7 +26,6 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        // ADDED 'where' and 'orderBy' to imports
         import { getFirestore, doc, addDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel, getDoc, setDoc, where, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // IMPORTANT: Global variables provided by the environment
@@ -34,19 +33,14 @@
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
         // --- START OF FIX FOR GITHUB DEPLOYMENT ---
-        // 1. Check for environment config
         let firebaseConfig = {};
         if (typeof __firebase_config !== 'undefined') {
-            // Use environment config when available (in Canvas)
             firebaseConfig = JSON.parse(__firebase_config);
         } else {
-            // Placeholder config for public hosting (like GitHub).
-            // NOTE: You must replace these placeholders with your actual Firebase project config 
-            // after setting up Firebase Authentication (Anonymous) and Firestore rules.
             firebaseConfig = {
-                apiKey: "YOUR_API_KEY_HERE", // Replace with your apiKey
-                authDomain: "YOUR_PROJECT_ID.firebaseapp.com", // Replace with your authDomain
-                projectId: "YOUR_PROJECT_ID", // Replace with your projectId
+                apiKey: "YOUR_API_KEY_HERE", 
+                authDomain: "YOUR_PROJECT_ID.firebaseapp.com", 
+                projectId: "YOUR_PROJECT_ID", 
                 storageBucket: "YOUR_PROJECT_ID.appspot.com",
                 messagingSenderId: "YOUR_SENDER_ID",
                 appId: "YOUR_APP_ID"
@@ -58,15 +52,24 @@
         let app, db, auth;
         let userId = null;
         let isAuthReady = false;
-
+        
+        // Global storage for transaction data for client-side filtering
+        let companyTransactionsCache = {}; 
         setLogLevel('Debug');
         
+        // === PUBLIC DATA PATH CONFIGURATION ===
+        // All collections will now live under /artifacts/{appId}/public/data/
+        const PUBLIC_BASE_PATH = `artifacts/${appId}/public/data`;
+        
+        const getCollectionPath = (collectionName) => `${PUBLIC_BASE_PATH}/${collectionName}`;
+        // ======================================
+
+
         // --- Core Firebase Initialization ---
         const initializeFirebase = async () => {
             try {
                 if (!firebaseConfig || !firebaseConfig.projectId || firebaseConfig.projectId === "YOUR_PROJECT_ID") {
                     console.error("Firebase configuration is missing or using placeholders. Cannot connect to a database.");
-                    // Display a warning message on the UI
                     showMessage("Database Connection Error: Missing Firebase configuration. Please replace placeholders in the code.", 'error');
                     return;
                 }
@@ -79,8 +82,6 @@
                     if (user) {
                         userId = user.uid;
                     } else {
-                        // FIX: Ensure anonymous sign-in is attempted if no user is found 
-                        // and no custom token is available (e.g., when deployed publicly)
                         try {
                             const res = await signInAnonymously(auth);
                             userId = res.user.uid;
@@ -88,23 +89,19 @@
                             console.error("Anonymous sign-in failed:", err);
                         }
                     }
+                    
                     isAuthReady = true;
                     document.getElementById('user-id-display').textContent = userId || 'N/A';
                     if (db && userId) {
-                        setupRealtimeListeners(db, userId);
+                        setupRealtimeListeners(db);
                     }
                     // Ensure the initial view is rendered
-                    switchView('reports');
+                    switchView('new-report');
                 });
 
                 if (initialAuthToken) {
-                    // This block runs only in the Canvas environment
                     await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    // This is the path for public deployment (anonymous sign-in handled by onAuthStateChanged)
-                    // If we're outside Canvas, let onAuthStateChanged handle the initial sign-in.
                 }
-
             } catch (error) {
                 console.error("Firebase initialization failed:", error);
                 showMessage("Firebase Initialization Failed. Check your console for details.", 'error');
@@ -112,31 +109,30 @@
         };
 
         // --- Realtime Listeners ---
-        const setupRealtimeListeners = (dbInstance, currentUserId) => {
-            // Listener for Transaction Reports
-            const reportsColRef = collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/reports`);
+        const setupRealtimeListeners = (dbInstance) => {
+            // 1. Transaction Reports
+            const reportsColRef = collection(dbInstance, getCollectionPath('reports'));
             onSnapshot(query(reportsColRef), (snapshot) => {
                 const reports = [];
                 snapshot.forEach((doc) => {
                     reports.push({ id: doc.id, ...doc.data() });
                 });
-                // Sort client-side for simplicity, based on existing pattern
                 reports.sort((a, b) => (b.timestamp?.toMillis() || Date.now()) - (a.timestamp?.toMillis() || Date.now()));
                 renderReports(reports);
             }, (error) => console.error("Error fetching reports: ", error));
 
-            // Listener for Boatman Ledgers (Summary Balances)
-            const boatmanColRef = collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/boatmanBalances`);
-            onSnapshot(query(boatmanColRef), (snapshot) => {
+            // 2. Dealer Ledgers
+            const dealerColRef = collection(dbInstance, getCollectionPath('dealerBalances'));
+            onSnapshot(query(dealerColRef), (snapshot) => {
                 const balances = [];
                 snapshot.forEach((doc) => {
                     balances.push({ name: doc.id, ...doc.data() });
                 });
-                renderBoatmanLedgers(balances);
-            }, (error) => console.error("Error fetching boatman ledgers: ", error));
+                renderDealerLedgers(balances);
+            }, (error) => console.error("Error fetching dealer ledgers: ", error));
             
-            // Listener for Company Ledgers (Summary Balances)
-            const companyColRef = collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/companyBalances`);
+            // 3. Company Ledgers
+            const companyColRef = collection(dbInstance, getCollectionPath('companyBalances'));
             onSnapshot(query(companyColRef), (snapshot) => {
                 const balances = [];
                 snapshot.forEach((doc) => {
@@ -144,10 +140,193 @@
                 });
                 renderCompanyLedgers(balances);
             }, (error) => console.error("Error fetching company ledgers: ", error));
+
+            // 4. Cash Accounts Ledger (NEW)
+            const cashColRef = collection(dbInstance, getCollectionPath('cashAccounts'));
+            onSnapshot(query(cashColRef), (snapshot) => {
+                const balances = [];
+                snapshot.forEach((doc) => {
+                    balances.push({ name: doc.id, ...doc.data() });
+                });
+                renderCashAccounts(balances);
+                updatePaymentMethodOptions(balances); // Update payment forms
+            }, (error) => console.error("Error fetching cash ledgers: ", error));
         };
         
-        // --- View Rendering (No changes needed in rendering functions) ---
+        // --- Helper: Update Payment Method Dropdowns ---
+        const updatePaymentMethodOptions = (balances) => {
+            const selectElements = [
+                document.getElementById('paymentMethod'), // Dealer Advance
+                document.getElementById('billReceiveMethod'), // Bill Payment
+            ];
 
+            selectElements.forEach(select => {
+                if (select) {
+                    // Clear existing options, keeping the default disabled one
+                    while (select.options.length > 1) {
+                        select.remove(1);
+                    }
+                    
+                    balances.forEach(b => {
+                        const option = document.createElement('option');
+                        option.value = b.name;
+                        option.textContent = `${b.name} (Bal: ${b.balance ? b.balance.toFixed(2) : '0.00'})`;
+                        select.appendChild(option);
+                    });
+                }
+            });
+        }
+
+
+        // --- Ledger Update Helpers ---
+
+        const getLedgerRef = (collectionName, name) => {
+            if (!db || !name) return null;
+            return doc(db, getCollectionPath(collectionName), name);
+        }
+        
+        // Generic function to update any ledger balance
+        const updateLedgerBalance = async (collectionName, name, adjustment) => {
+            if (!db || !name) return 0;
+
+            const ledgerRef = getLedgerRef(collectionName, name);
+            if (!ledgerRef) return 0;
+
+            try {
+                const docSnap = await getDoc(ledgerRef);
+                const startingBalance = docSnap.exists() ? docSnap.data().balance : 0;
+                
+                const newBalance = startingBalance + adjustment;
+
+                await setDoc(ledgerRef, {
+                    balance: newBalance,
+                    lastUpdated: serverTimestamp()
+                }, { merge: true });
+                
+                return newBalance; 
+            } catch (error) {
+                console.error(`Failed to update ${collectionName} ledger for ${name}:`, error);
+                throw new Error("Failed to update ledger.");
+            }
+        };
+
+
+        // --- Bank & Cash Accounts Logic ---
+
+        const renderCashAccounts = (balances) => {
+            const container = document.getElementById('cash-accounts-container');
+            if (!container) return;
+            
+            // Seed a standard set of accounts if they don't exist
+            const accountsToSeed = ['Cash', 'Bank 1', 'Bank 2', 'Bank 3', 'Bkash', 'Nagad'];
+            const allBalances = accountsToSeed.map(name => {
+                const existing = balances.find(b => b.name === name);
+                return existing || { name, balance: 0, lastUpdated: null };
+            });
+
+            container.innerHTML = '';
+            
+            allBalances.forEach(c => {
+                const balance = c.balance || 0;
+                const balanceClass = balance > 0 ? 'bg-indigo-100 text-indigo-800' : 'bg-red-100 text-red-800';
+                
+                const card = `
+                    <div class="p-4 rounded-xl shadow border-l-4 border-indigo-500 bg-white">
+                        <h4 class="text-xl font-bold text-slate-700 mb-2">${c.name}</h4>
+                        <div class="text-sm ${balanceClass} p-2 rounded-lg flex justify-between">
+                            <span class="font-medium">Current Balance:</span>
+                            <span class="font-extrabold">BDT ${balance.toFixed(2)}</span>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-2">Last Update: ${c.lastUpdated ? new Date(c.lastUpdated.toMillis()).toLocaleDateString() : 'N/A'}</p>
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', card);
+            });
+        };
+        
+        // Function to create a new cash account (if needed, though initial ones are seeded)
+        const handleCashAccountFormSubmit = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const accountName = form.newAccountName.value.trim();
+            const initialBalance = parseFloat(form.initialBalance.value) || 0;
+
+            if (!accountName) {
+                showMessage("Account name cannot be empty.", 'error');
+                return;
+            }
+
+            try {
+                const newBalance = await updateLedgerBalance('cashAccounts', accountName, initialBalance);
+
+                showMessage(`Account '${accountName}' created with BDT ${initialBalance.toFixed(2)} balance.`, 'success');
+                form.reset();
+            } catch (e) {
+                showMessage(`Failed to create account: ${e.message}`, 'error');
+            }
+        };
+
+
+        // --- Weekly Reporting Filter Logic ---
+
+        /**
+         * Calculates the Friday-Wednesday week range for a given date.
+         * @param {Date} today - The reference date.
+         * @returns {{start: Date, end: Date}}
+         */
+        function getFridayWednesdayWeek(today) {
+            const date = new Date(today.getTime());
+            
+            // 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
+            const dayOfWeek = date.getDay(); 
+            
+            let daysToLastFriday;
+            if (dayOfWeek === 5) { // If today is Friday (start of week)
+                daysToLastFriday = 0;
+            } else if (dayOfWeek === 6) { // If today is Saturday
+                daysToLastFriday = 1;
+            } else { // Sunday (0) to Thursday (4) -> Days from Friday (5)
+                daysToLastFriday = dayOfWeek + 2; 
+            }
+
+            // Calculate Start Date (Friday)
+            const friday = new Date(date);
+            friday.setDate(date.getDate() - daysToLastFriday);
+            friday.setHours(0, 0, 0, 0);
+
+            // Calculate End Date (Wednesday)
+            const wednesday = new Date(friday);
+            wednesday.setDate(friday.getDate() + 5); // 5 days after Friday is Wednesday
+            wednesday.setHours(23, 59, 59, 999);
+            
+            return { start: friday, end: wednesday };
+        }
+
+        window.filterWeeklyCompanyHistory = (companyName) => {
+            const transactions = companyTransactionsCache[companyName] || [];
+            
+            // Calculate the current weekly range (Friday-Wednesday)
+            const today = new Date();
+            const { start, end } = getFridayWednesdayWeek(today);
+
+            const filteredTransactions = transactions.filter(t => {
+                // Ensure transaction has a valid date string (deliveryDate)
+                const tDate = new Date(t.deliveryDate);
+                if (isNaN(tDate)) return false; 
+                
+                return tDate >= start && tDate <= end;
+            });
+            
+            renderCompanyHistoryTable(companyName, filteredTransactions, true); // True means filtered view
+        };
+
+        window.showAllCompanyHistory = (companyName) => {
+             const transactions = companyTransactionsCache[companyName] || [];
+             renderCompanyHistoryTable(companyName, transactions, false); // False means show all
+        }
+
+        // --- Other Render Functions ---
+        
         const renderReports = (reports) => {
             const container = document.getElementById('reports-history-container');
             if (!container) return;
@@ -159,28 +338,38 @@
 
             reports.forEach(report => {
                 const profitColor = report.netProfit >= 0 ? 'text-green-600' : 'text-red-600';
-                
-                // When selling wood, the cost is DEDUCTED from the advance.
-                // The adjustment is negative (deduction).
-                const endBalance = report.startingBoatmanBalance + report.boatmanBalanceAdjustment;
+                const endBalance = report.startingDealerBalance + report.dealerBalanceAdjustment;
                 const balanceText = endBalance < 0 
-                    ? `<span class="text-red-600 font-bold">BDT ${endBalance.toFixed(2)} (Due TO Boatman)</span>`
+                    ? `<span class="text-red-600 font-bold">BDT ${endBalance.toFixed(2)} (Due TO Dealer)</span>`
                     : `<span class="text-teal-700 font-bold">BDT ${endBalance.toFixed(2)} (Advance HELD)</span>`;
-                const totalCostDue = report.boatmanCostPerKg * report.totalQuantityKg;
+                
+                const totalQuantityKg = report.items.reduce((sum, item) => sum + item.totalQuantityKg, 0);
+                const totalDealerCostDue = report.items.reduce((sum, item) => sum + (item.dealerCostPerKg * item.totalQuantityKg), 0);
+
+                const itemListHtml = report.items.map(item => `
+                    <li class="text-xs text-gray-600 flex justify-between">
+                        <span>${item.woodGrade} (${item.totalQuantityKg.toFixed(2)} kg)</span>
+                        <span class="font-medium text-gray-800">C: BDT ${(item.dealerCostPerKg * item.totalQuantityKg).toFixed(2)}</span>
+                    </li>
+                `).join('');
 
                 const card = `
                     <div class="bg-white p-5 rounded-xl shadow-md border-l-4 border-teal-600">
                         <div class="flex justify-between items-start mb-3 border-b pb-2">
-                            <h3 class="text-lg font-bold text-slate-800">Challan: ${report.challanNo} (${report.woodGrade})</h3>
+                            <h3 class="text-lg font-bold text-slate-800">Challan: ${report.challanNo}</h3>
                             <span class="text-xs text-gray-500 bg-slate-100 px-2 py-1 rounded">${report.date}</span>
                         </div>
 
                         <div class="grid grid-cols-2 gap-2 text-sm text-gray-700">
-                            <div><span class="font-medium text-slate-600">Boatman:</span> ${report.boatmanName}</div>
+                            <div><span class="font-medium text-slate-600">Dealer:</span> ${report.dealerName}</div>
                             <div><span class="font-medium text-slate-600">Destination:</span> ${report.destination}</div>
                             <div><span class="font-medium text-slate-600">Trawler/Truck:</span> ${report.trawlerTruckNo}</div>
-                            <div><span class="font-medium text-slate-600">Quantity (kg):</span> ${report.totalQuantityKg.toFixed(2)}</div>
+                            <div><span class="font-medium text-slate-600">Total Qty (kg):</span> ${totalQuantityKg.toFixed(2)}</div>
                         </div>
+
+                        <ul class="list-disc list-inside mt-3 text-sm border-t pt-2 space-y-1">
+                            ${itemListHtml}
+                        </ul>
 
                         <div class="mt-3 pt-3 border-t border-dashed">
                             <p class="font-semibold flex justify-between items-center text-md">
@@ -188,10 +377,10 @@
                                 <span class="${profitColor} text-xl font-extrabold">BDT ${report.netProfit.toFixed(2)}</span>
                             </p>
                             <p class="text-xs mt-2 text-gray-600">
-                                Total Delivery Cost: BDT ${totalCostDue.toFixed(2)}
+                                Total Delivery Cost Deducted: BDT ${totalDealerCostDue.toFixed(2)}
                             </p>
                             <p class="text-xs mt-1 text-gray-600">
-                                **Ledger Adj:** BDT ${report.boatmanBalanceAdjustment.toFixed(2)} | **Ending Bal:** ${balanceText}
+                                **Ledger Adj:** BDT ${report.dealerBalanceAdjustment.toFixed(2)} | **Ending Bal:** ${balanceText}
                             </p>
                         </div>
                     </div>
@@ -200,23 +389,22 @@
             });
         };
 
-        const renderBoatmanLedgers = (balances) => {
-            const container = document.getElementById('boatman-ledgers-container');
+        const renderDealerLedgers = (balances) => {
+            const container = document.getElementById('dealer-ledgers-container');
             if (!container) return;
-            // Ensure summary is visible when new data arrives
             container.classList.remove('hidden'); 
-            document.getElementById('boatman-detail-history').classList.add('hidden');
+            document.getElementById('dealer-detail-history').classList.add('hidden');
             container.innerHTML = '';
             
             if (balances.length === 0) {
-                container.innerHTML = '<p class="text-center text-gray-500 p-8">No boatmen tracked yet.</p>';
+                container.innerHTML = '<p class="text-center text-gray-500 p-8">No dealers tracked yet.</p>';
                 return;
             }
 
             balances.forEach(b => {
                 const balance = b.balance || 0;
                 const balanceClass = balance < 0 ? 'bg-red-100 text-red-800' : (balance > 0 ? 'bg-teal-100 text-teal-800' : 'bg-gray-100 text-gray-600');
-                const balanceLabel = balance < 0 ? 'Due TO Boatman' : (balance > 0 ? 'Advance HELD' : 'Balance Zero');
+                const balanceLabel = balance < 0 ? 'Due TO Dealer' : (balance > 0 ? 'Advance HELD' : 'Balance Zero');
                 
                 const card = `
                     <div class="p-4 rounded-xl shadow border-l-4 border-slate-500 bg-white">
@@ -226,7 +414,7 @@
                             <span class="font-extrabold">BDT ${balance.toFixed(2)}</span>
                         </div>
                         <p class="text-xs text-gray-400 mt-2">Last Update: ${b.lastUpdated ? new Date(b.lastUpdated.toMillis()).toLocaleString() : 'N/A'}</p>
-                        <button onclick="window.viewBoatmanHistory('${b.name}')" class="mt-3 w-full text-sm py-2 bg-teal-600 text-white rounded-xl hover:bg-teal-700 transition duration-150 shadow-md">
+                        <button onclick="window.viewDealerHistory('${b.name}')" class="mt-3 w-full text-sm py-2 bg-teal-600 text-white rounded-xl hover:bg-teal-700 transition duration-150 shadow-md">
                             View Transaction History
                         </button>
                     </div>
@@ -238,7 +426,6 @@
         const renderCompanyLedgers = (balances) => {
             const container = document.getElementById('company-ledgers-container');
             if (!container) return;
-            // Ensure summary is visible when new data arrives
             container.classList.remove('hidden');
             document.getElementById('company-detail-history').classList.add('hidden');
             container.innerHTML = '';
@@ -251,7 +438,6 @@
 
             allBalances.forEach(c => {
                 const balance = c.balance || 0;
-                // Positive balance means the company owes me (money receivable)
                 const balanceClass = balance > 0 ? 'bg-green-100 text-green-800' : (balance < 0 ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-600');
                 const balanceLabel = balance > 0 ? 'Amount Receivable (Owed By Company)' : (balance < 0 ? 'Amount Overpaid (I Owe Company)' : 'Balance Zero');
                 
@@ -272,52 +458,47 @@
             });
         };
 
-        // --- Ledger History Logic ---
-
-        window.viewBoatmanHistory = (boatmanName) => {
-            if (!isAuthReady || !userId || !db) {
+        window.viewDealerHistory = (dealerName) => {
+            if (!isAuthReady || !db) {
                 showMessage("Authentication not ready. Cannot fetch history.", 'error');
                 return;
             }
-            // Hide summary, show detail container
-            document.getElementById('boatman-ledgers-container').classList.add('hidden');
-            const detailContainer = document.getElementById('boatman-detail-history');
+            document.getElementById('dealer-ledgers-container').classList.add('hidden');
+            const detailContainer = document.getElementById('dealer-detail-history');
             detailContainer.classList.remove('hidden');
-            detailContainer.innerHTML = `<h3 class="text-2xl font-semibold mb-4 text-slate-700">Transaction History for ${boatmanName}</h3><p class="text-center p-4">Loading transactions...</p>`;
+            detailContainer.innerHTML = `<h3 class="text-2xl font-semibold mb-4 text-slate-700">Transaction History for ${dealerName}</h3><p class="text-center p-4">Loading transactions...</p>`;
 
-            // Fetch transactions for the specific boatman, ordered by time descending
-            const transactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/boatman_transactions`);
+            const transactionsColRef = collection(db, getCollectionPath('dealer_transactions')); 
             const q = query(
                 transactionsColRef, 
-                where("boatmanName", "==", boatmanName), 
+                where("dealerName", "==", dealerName), 
                 orderBy("timestamp", "desc")
             );
 
-            // Use onSnapshot for real-time update
             onSnapshot(q, (snapshot) => {
                 const transactions = [];
                 snapshot.forEach((doc) => {
                     transactions.push({ id: doc.id, ...doc.data() });
                 });
-                renderBoatmanHistoryTable(boatmanName, transactions);
-            }, (error) => console.error("Error fetching boatman history: ", error));
+                renderDealerHistoryTable(dealerName, transactions);
+            }, (error) => console.error("Error fetching dealer history: ", error));
         };
 
-        const renderBoatmanHistoryTable = (boatmanName, transactions) => {
-            const detailContainer = document.getElementById('boatman-detail-history');
+        const renderDealerHistoryTable = (dealerName, transactions) => {
+            const detailContainer = document.getElementById('dealer-detail-history');
 
             if (transactions.length === 0) {
                 detailContainer.innerHTML = `
-                    <h3 class="text-2xl font-semibold mb-4 text-slate-700">Transaction History for ${boatmanName}</h3>
-                    <button onclick="window.showBoatmanLedgerSummary()" class="mb-4 text-sm text-teal-600 hover:text-teal-800">← Back to Ledger Summary</button>
-                    <p class="p-4 bg-gray-100 rounded-xl shadow-inner">No transactions found for this boatman.</p>
+                    <h3 class="text-2xl font-semibold mb-4 text-slate-700">Transaction History for ${dealerName}</h3>
+                    <button onclick="window.showDealerLedgerSummary()" class="mb-4 text-sm text-teal-600 hover:text-teal-800">← Back to Ledger Summary</button>
+                    <p class="p-4 bg-gray-100 rounded-xl shadow-inner">No transactions found for this dealer.</p>
                 `;
                 return;
             }
 
             let tableHtml = `
-                <h3 class="text-2xl font-semibold mb-4 text-slate-700">Transaction History for ${boatmanName}</h3>
-                <button onclick="window.showBoatmanLedgerSummary()" class="mb-4 text-sm font-medium text-teal-600 hover:text-teal-800 transition">← Back to Ledger Summary</button>
+                <h3 class="text-2xl font-semibold mb-4 text-slate-700">Transaction History for ${dealerName}</h3>
+                <button onclick="window.showDealerLedgerSummary()" class="mb-4 text-sm font-medium text-teal-600 hover:text-teal-800 transition">← Back to Ledger Summary</button>
                 <div class="overflow-x-auto bg-white rounded-xl shadow-lg border">
                     <table class="min-w-full divide-y divide-gray-200">
                         <thead class="bg-gray-50 sticky top-0">
@@ -357,74 +538,91 @@
             detailContainer.innerHTML = tableHtml;
         };
 
-        // Function to switch back to boatman summary view
-        window.showBoatmanLedgerSummary = () => {
-            document.getElementById('boatman-ledgers-container').classList.remove('hidden');
-            document.getElementById('boatman-detail-history').classList.add('hidden');
+        window.showDealerLedgerSummary = () => {
+            document.getElementById('dealer-ledgers-container').classList.remove('hidden');
+            document.getElementById('dealer-detail-history').classList.add('hidden');
         };
 
-        // --- Company History Logic (FIXED FOR INDEX ERROR) ---
-
         window.viewCompanyHistory = (companyName) => {
-            if (!isAuthReady || !userId || !db) {
+            if (!isAuthReady || !db) {
                 showMessage("Authentication not ready. Cannot fetch history.", 'error');
                 return;
             }
-            // Hide summary, show detail container
             document.getElementById('company-ledgers-container').classList.add('hidden');
             const detailContainer = document.getElementById('company-detail-history');
             detailContainer.classList.remove('hidden');
             detailContainer.innerHTML = `<h3 class="text-2xl font-semibold mb-4 text-slate-700">Receivable History for ${companyName}</h3><p class="text-center p-4">Loading transactions...</p>`;
 
-            // Fetch transactions for the specific company
-            const transactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/company_transactions`);
-            
-            // FIX: Removed 'orderBy("timestamp", "desc")' to avoid the index requirement.
-            // Sorting will now be done client-side.
+            const transactionsColRef = collection(db, getCollectionPath('company_transactions'));
             const q = query(
                 transactionsColRef, 
                 where("companyName", "==", companyName) 
             );
 
-            // Use onSnapshot for real-time update
             onSnapshot(q, (snapshot) => {
                 const transactions = [];
                 snapshot.forEach((doc) => {
                     transactions.push({ id: doc.id, ...doc.data() });
                 });
                 
-                // CLIENT-SIDE SORTING: Sort transactions by timestamp descending
                 transactions.sort((a, b) => {
                     const timeA = a.timestamp ? a.timestamp.toMillis() : 0;
                     const timeB = b.timestamp ? b.timestamp.toMillis() : 0;
                     return timeB - timeA;
                 });
+                
+                // Cache the full data for client-side filtering
+                companyTransactionsCache[companyName] = transactions;
 
-                renderCompanyHistoryTable(companyName, transactions);
+                renderCompanyHistoryTable(companyName, transactions, false); // Default to show all
             }, (error) => console.error("Error fetching company history: ", error));
         };
 
-        const renderCompanyHistoryTable = (companyName, transactions) => {
+        const renderCompanyHistoryTable = (companyName, transactions, isFiltered) => {
             const detailContainer = document.getElementById('company-detail-history');
+            const today = new Date();
+            const { start, end } = getFridayWednesdayWeek(today);
 
             if (transactions.length === 0) {
+                 // Check if the empty state is because of filtering
+                const message = isFiltered 
+                    ? `No transactions found between ${start.toLocaleDateString()} (Friday) and ${end.toLocaleDateString()} (Wednesday).`
+                    : `No recorded sales found for this company.`;
+                    
                 detailContainer.innerHTML = `
                     <h3 class="text-2xl font-semibold mb-4 text-slate-700">Receivable History for ${companyName}</h3>
-                    <button onclick="window.showCompanyLedgerSummary()" class="mb-4 text-sm text-green-600 hover:text-green-800">← Back to Ledger Summary</button>
-                    <p class="p-4 bg-gray-100 rounded-xl shadow-inner">No recorded sales found for this company.</p>
+                    <div class="flex space-x-4 mb-4">
+                        <button onclick="window.showCompanyLedgerSummary()" class="text-sm font-medium text-green-600 hover:text-green-800 transition">← Back to Ledger Summary</button>
+                    </div>
+                    <p class="p-4 bg-gray-100 rounded-xl shadow-inner">${message}</p>
                 `;
                 return;
             }
 
+            let filterButtonHtml;
+            if (isFiltered) {
+                filterButtonHtml = `<button onclick="window.showAllCompanyHistory('${companyName}')" class="text-sm py-2 px-4 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition">Show All Transactions</button>
+                                    <p class="text-sm text-gray-600 ml-4 flex items-center">
+                                    <span class="mr-2">&#9679;</span>Filtered: ${start.toLocaleDateString()} (Fri) to ${end.toLocaleDateString()} (Wed)
+                                    </p>`;
+            } else {
+                filterButtonHtml = `<button onclick="window.filterWeeklyCompanyHistory('${companyName}')" class="text-sm py-2 px-4 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 transition">Filter Current Week (Fri-Wed)</button>`;
+            }
+
+
             let tableHtml = `
                 <h3 class="text-2xl font-semibold mb-4 text-slate-700">Receivable History for ${companyName}</h3>
-                <button onclick="window.showCompanyLedgerSummary()" class="mb-4 text-sm font-medium text-green-600 hover:text-green-800 transition">← Back to Ledger Summary</button>
+                <div class="flex space-x-4 mb-4 items-center">
+                    <button onclick="window.showCompanyLedgerSummary()" class="text-sm font-medium text-green-600 hover:text-green-800 transition">← Back to Ledger Summary</button>
+                    ${filterButtonHtml}
+                </div>
                 <div class="overflow-x-auto bg-white rounded-xl shadow-lg border">
                     <table class="min-w-full divide-y divide-gray-200">
                         <thead class="bg-gray-50 sticky top-0">
                             <tr>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Delivery Date</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type / Challan</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Method</th>
                                 <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Amount Receivable (BDT)</th>
                                 <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Running Balance</th>
                             </tr>
@@ -433,8 +631,7 @@
             `;
             
             transactions.forEach(t => {
-                // The delivery date is logged as a string from the form input (data.date)
-                const amountClass = t.amount > 0 ? 'text-green-600 font-medium' : 'text-gray-600 font-medium';
+                const amountClass = t.amount > 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium';
                 const balanceClass = t.currentBalance > 0 ? 'text-green-800' : 'text-red-800';
 
                 tableHtml += `
@@ -457,93 +654,17 @@
             detailContainer.innerHTML = tableHtml;
         };
 
-        // Function to switch back to company summary view
         window.showCompanyLedgerSummary = () => {
             document.getElementById('company-ledgers-container').classList.remove('hidden');
             document.getElementById('company-detail-history').classList.add('hidden');
         };
 
 
-        // --- Ledger Update Helpers ---
-
-        const getLedgerRef = (collectionName, name) => {
-            if (!db || !userId || !name) return null;
-            // Name is used as the Document ID for ledgers
-            return doc(db, `artifacts/${appId}/users/${userId}/${collectionName}`, name);
-        }
-
-        const updateLedgerBalance = async (collectionName, name, adjustment) => {
-            if (!db || !userId || !name) return 0;
-
-            const ledgerRef = getLedgerRef(collectionName, name);
-            if (!ledgerRef) return 0;
-
-            try {
-                const docSnap = await getDoc(ledgerRef);
-                const startingBalance = docSnap.exists() ? docSnap.data().balance : 0;
-                
-                // New Balance = Starting Balance + Adjustment (can be positive or negative)
-                const newBalance = startingBalance + adjustment;
-
-                await setDoc(ledgerRef, {
-                    balance: newBalance,
-                    lastUpdated: serverTimestamp()
-                }, { merge: true });
-                
-                // Return the new balance for transaction logging
-                return newBalance; 
-            } catch (error) {
-                console.error(`Failed to update ${collectionName} ledger for ${name}:`, error);
-                throw new Error("Failed to update ledger.");
-            }
-        };
-
-        // --- Boatman Balance Check (For Live Form Feedback) ---
-
-        window.checkBoatmanBalance = async () => {
-            // Logic remains the same, but we get the name from the active form
-            const boatmanName = document.getElementById('boatmanName')?.value.trim() || document.getElementById('paymentBoatmanName')?.value.trim();
-            const balanceDisplay = document.getElementById('boatman-balance-display-report') || document.getElementById('boatman-balance-display-payment');
-            const currentBalanceSpan = balanceDisplay?.querySelector('#current-balance');
-
-            if (!boatmanName || boatmanName.length < 3 || !isAuthReady || !db || !balanceDisplay) {
-                if (balanceDisplay) balanceDisplay.classList.add('hidden');
-                return;
-            }
-
-            try {
-                const ledgerRef = getLedgerRef('boatmanBalances', boatmanName);
-                if (!ledgerRef) return;
-
-                const docSnap = await getDoc(ledgerRef);
-                const currentBalance = docSnap.exists() ? docSnap.data().balance : 0;
-                
-                currentBalanceSpan.textContent = `BDT ${currentBalance.toFixed(2)}`;
-                balanceDisplay.className = 'text-sm p-3 rounded-lg shadow-inner mt-2';
-                balanceDisplay.classList.remove('hidden');
-
-                if (currentBalance < 0) {
-                    balanceDisplay.classList.add('bg-red-50', 'text-red-800');
-                    balanceDisplay.querySelector('span:first-child').textContent = 'Due TO Boatman (You Owe):';
-                } else if (currentBalance > 0) {
-                    balanceDisplay.classList.add('bg-teal-50', 'text-teal-800');
-                    balanceDisplay.querySelector('span:first-child').textContent = 'Advance HELD (Boatman Owes):';
-                } else {
-                    balanceDisplay.classList.add('bg-gray-50', 'text-gray-600');
-                    balanceDisplay.querySelector('span:first-child').textContent = 'No Outstanding Balance:';
-                }
-
-            } catch (error) {
-                console.error("Error checking boatman balance:", error);
-                balanceDisplay.classList.add('hidden');
-            }
-        };
-
-        // --- SALES Form Submission Handler ---
+        // --- SALES Form Submission Handler (Deduct Dealer Cost) ---
 
         const handleReportSubmit = async (event) => {
             event.preventDefault();
-            if (!isAuthReady || !userId || !db) {
+            if (!isAuthReady || !db) {
                 showMessage("Authentication not ready. Please wait.", 'error');
                 return;
             }
@@ -554,143 +675,239 @@
                 date: form.date.value,
                 trawlerTruckNo: form.trawlerTruckNo.value.trim(),
                 dealerName: form.dealerName.value.trim(),
-                boatmanName: form.boatmanName.value.trim(),
-                woodGrade: form.woodGrade.value,
                 destination: form.destination.value,
-                totalQuantityKg: parseFloat(form.totalQuantityKg.value),
-                buyPricePerKg: parseFloat(form.buyPricePerKg.value),
-                sellPricePerKg: parseFloat(form.sellPricePerKg.value),
-                boatmanCostPerKg: parseFloat(form.boatmanCostPerKg.value),
-                totalPaymentGiven: 0,
-                incentiveAmount: 0,
-                paymentMethod: 'N/A (Recorded Separately)',
+                totalQuantityKg: 0, 
+                netProfit: 0,
+                items: [],
+                recordedByUserId: userId // Add user ID to public data
             };
 
-            const numberFields = ['totalQuantityKg', 'buyPricePerKg', 'sellPricePerKg', 'boatmanCostPerKg'];
-            if (numberFields.some(key => isNaN(data[key]) || data[key] < 0)) {
-                 showMessage("Please enter valid, non-negative numbers for all price, quantity, and cost fields.", 'error');
+            if (!data.dealerName || !data.destination || !data.challanNo || !data.date) {
+                showMessage("Please fill out all primary Challan fields.", 'error');
                 return;
             }
-            if (data.totalQuantityKg <= 0) {
-                 showMessage("Total Quantity must be greater than zero.", 'error');
+            
+            const items = [];
+            for (let i = 1; i <= 4; i++) {
+                const quantity = parseFloat(form[`totalQuantityKg${i}`].value);
+                
+                if (quantity > 0) {
+                    const buyPrice = parseFloat(form[`buyPricePerKg${i}`].value);
+                    const sellPrice = parseFloat(form[`sellPricePerKg${i}`].value);
+                    
+                    const item = {
+                        woodGrade: form[`woodGrade${i}`].value,
+                        totalQuantityKg: quantity,
+                        buyPricePerKg: buyPrice,
+                        sellPricePerKg: sellPrice,
+                        dealerCostPerKg: buyPrice, 
+                    };
+
+                    const invalidRate = isNaN(buyPrice) || buyPrice < 0 || isNaN(sellPrice) || sellPrice < 0;
+                    if (invalidRate || isNaN(item.totalQuantityKg) || item.totalQuantityKg <= 0) {
+                        showMessage(`Invalid entry for Item ${i}: Please ensure quantity > 0 and Buy/Sell rates are valid non-negative numbers.`, 'error');
+                        return;
+                    }
+                    items.push(item);
+                }
+            }
+            
+            if (items.length === 0) {
+                showMessage("Please enter at least one wood item with a valid quantity.", 'error');
                 return;
             }
+            data.items = items;
+
 
             try {
                 // --- Financial Calculations ---
-                const totalRevenue = data.sellPricePerKg * data.totalQuantityKg;
-                const totalGoodsCost = data.buyPricePerKg * data.totalQuantityKg;
-                const totalBoatmanCost = data.boatmanCostPerKg * data.totalQuantityKg;
-                
-                // 1. Boatman Ledger Adjustment (DEDUCTION)
-                const boatmanAdjustment = -totalBoatmanCost;
-                const startingBalanceDoc = await getDoc(getLedgerRef('boatmanBalances', data.boatmanName));
-                const startingBoatmanBalance = startingBalanceDoc.exists() ? startingBalanceDoc.data().balance : 0;
-                const newBoatmanBalance = await updateLedgerBalance('boatmanBalances', data.boatmanName, boatmanAdjustment);
+                let totalRevenue = 0;
+                let totalGoodsCost = 0;
+                let totalDealerCost = 0;
+                let totalQuantity = 0;
 
-                // Log Boatman Transaction History (Deduction)
-                const boatmanTransactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/boatman_transactions`);
-                await addDoc(boatmanTransactionsColRef, {
-                    boatmanName: data.boatmanName,
+                items.forEach(item => {
+                    totalRevenue += item.sellPricePerKg * item.totalQuantityKg;
+                    totalGoodsCost += item.buyPricePerKg * item.totalQuantityKg;
+                    totalDealerCost += item.dealerCostPerKg * item.totalQuantityKg; 
+                    totalQuantity += item.totalQuantityKg;
+                });
+                data.totalQuantityKg = totalQuantity;
+
+                // 1. Dealer Ledger Adjustment (DEDUCTION)
+                const dealerAdjustment = -totalDealerCost;
+                const dealerLedgerRef = getLedgerRef('dealerBalances', data.dealerName);
+                const startingBalanceDoc = await getDoc(dealerLedgerRef);
+                const startingDealerBalance = startingBalanceDoc.exists() ? startingBalanceDoc.data().balance : 0;
+                const newDealerBalance = await updateLedgerBalance('dealerBalances', data.dealerName, dealerAdjustment);
+
+                // Log Dealer Transaction History
+                const dealerTransactionsColRef = collection(db, getCollectionPath('dealer_transactions')); 
+                await addDoc(dealerTransactionsColRef, {
+                    dealerName: data.dealerName,
                     type: 'Deduction (Sale)',
-                    amount: boatmanAdjustment, 
+                    amount: dealerAdjustment, 
                     relatedChallan: data.challanNo,
                     method: 'N/A (Deduction)',
                     timestamp: serverTimestamp(),
-                    currentBalance: newBoatmanBalance,
+                    currentBalance: newDealerBalance,
+                    recordedByUserId: userId
                 });
-
 
                 // 2. Company Ledger Adjustment (REVENUE/RECEIVABLE)
                 const companyAdjustment = totalRevenue; 
                 const newCompanyBalance = await updateLedgerBalance('companyBalances', data.destination, companyAdjustment);
 
-                // Log Company Transaction History (Sale/Revenue) - NEW
-                const companyTransactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/company_transactions`);
+                // Log Company Transaction History (Sale/Revenue)
+                const companyTransactionsColRef = collection(db, getCollectionPath('company_transactions'));
                 await addDoc(companyTransactionsColRef, {
                     companyName: data.destination,
                     type: 'Sale/Revenue',
                     amount: companyAdjustment, // Positive amount as receivable
                     relatedChallan: data.challanNo,
-                    deliveryDate: data.date, // The crucial date requested by the user
+                    deliveryDate: data.date, 
                     timestamp: serverTimestamp(),
                     currentBalance: newCompanyBalance,
+                    recordedByUserId: userId
                 });
 
-                // Net Profit = (Total Revenue) - (Cost of Goods) - (Boatman Cost)
-                const netProfit = totalRevenue - totalGoodsCost - totalBoatmanCost; 
+                const netProfit = totalRevenue - totalGoodsCost - totalDealerCost; 
 
                 const transaction = {
                     ...data,
                     netProfit: netProfit,
-                    startingBoatmanBalance: startingBoatmanBalance,
-                    boatmanBalanceAdjustment: boatmanAdjustment,
+                    startingDealerBalance: startingDealerBalance,
+                    dealerBalanceAdjustment: dealerAdjustment,
+                    totalRevenue: totalRevenue,
+                    totalGoodsCost: totalGoodsCost,
+                    totalDealerCost: totalDealerCost,
+                    items: items,
                     timestamp: serverTimestamp(),
                     userId: userId,
                 };
 
-                // Save to Firestore Reports
-                const reportsColRef = collection(db, `artifacts/${appId}/users/${userId}/reports`);
+                const reportsColRef = collection(db, getCollectionPath('reports'));
                 await addDoc(reportsColRef, transaction);
                 
-                showMessage("Sales Report saved! Boatman cost deducted. Net Profit: BDT " + netProfit.toFixed(2), 'success');
+                showMessage("Sales Report saved! Dealer cost deducted. Net Profit: BDT " + netProfit.toFixed(2), 'success');
                 form.reset();
-                document.getElementById('boatman-balance-display-report').classList.add('hidden');
+                document.getElementById('dealer-balance-display-report').classList.add('hidden');
             } catch (e) {
                 console.error("Error adding document: ", e);
                 showMessage("Failed to save report: " + e.message, 'error');
             }
         };
 
-        // --- PAYMENT Form Submission Handler ---
+        // --- PAYMENT Form Submission Handler (Record Dealer Advance) ---
 
         const handlePaymentSubmission = async (event) => {
             event.preventDefault();
-            if (!isAuthReady || !userId || !db) {
+            if (!isAuthReady || !db) {
                 showMessage("Authentication not ready. Please wait.", 'error');
                 return;
             }
 
             const form = event.target;
-            const boatmanName = form.paymentBoatmanName.value.trim();
+            const dealerName = form.paymentDealerName.value.trim();
             const amount = parseFloat(form.paymentAmount.value);
-            const method = form.paymentMethod.value;
+            const method = form.paymentMethod.value; // CASH ACCOUNT SELECTED
 
             if (isNaN(amount) || amount <= 0) {
                  showMessage("Please enter a valid amount greater than zero.", 'error');
                 return;
             }
-            if (!boatmanName) {
-                 showMessage("Boatman's name is required.", 'error');
+            if (!dealerName || !method) {
+                 showMessage("Dealer's name and Payment Method are required.", 'error');
                 return;
             }
 
             try {
-                // Boatman Ledger Adjustment (ADVANCE)
-                const newBoatmanBalance = await updateLedgerBalance('boatmanBalances', boatmanName, amount);
+                // 1. Cash Account Adjustment (DEDUCTION) - Since advance is GIVEN
+                const cashAdjustment = -amount;
+                await updateLedgerBalance('cashAccounts', method, cashAdjustment);
                 
-                // Log Boatman Transaction History (Advance Payment)
-                const boatmanTransactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/boatman_transactions`);
-                await addDoc(boatmanTransactionsColRef, {
-                    boatmanName: boatmanName,
+                // 2. Dealer Ledger Adjustment (ADVANCE) - Addition
+                const newDealerBalance = await updateLedgerBalance('dealerBalances', dealerName, amount);
+                
+                // Log Dealer Transaction History (Advance Payment)
+                const dealerTransactionsColRef = collection(db, getCollectionPath('dealer_transactions'));
+                await addDoc(dealerTransactionsColRef, {
+                    dealerName: dealerName,
                     type: 'Advance (Payment)',
                     amount: amount, 
                     relatedChallan: 'N/A',
-                    method: method,
+                    method: method, // Payment Method (Bank/Cash)
                     timestamp: serverTimestamp(),
-                    currentBalance: newBoatmanBalance,
+                    currentBalance: newDealerBalance,
+                    recordedByUserId: userId
                 });
                 
-                showMessage(`Successfully recorded BDT ${amount.toFixed(2)} advance to ${boatmanName} via ${method}.`, 'success');
+                showMessage(`Successfully recorded BDT ${amount.toFixed(2)} advance to ${dealerName} via ${method}. BDT ${amount.toFixed(2)} deducted from ${method} balance.`, 'success');
                 form.reset();
-                // Re-check balance display after update
-                setTimeout(checkBoatmanBalance, 100); 
+                setTimeout(checkDealerBalance, 100); 
             } catch (e) {
                 console.error("Error recording payment: ", e);
                 showMessage("Failed to record payment: " + e.message, 'error');
             }
         }
+        
+        // --- BILL PAYMENT Form Submission Handler (NEW) ---
 
+        const handleBillPayment = async (event) => {
+            event.preventDefault();
+            if (!isAuthReady || !db) {
+                showMessage("Authentication not ready. Please wait.", 'error');
+                return;
+            }
+
+            const form = event.target;
+            const companyName = form.billCompanyName.value.trim();
+            const amount = parseFloat(form.billReceiveAmount.value);
+            const method = form.billReceiveMethod.value; // CASH ACCOUNT SELECTED
+            const challanNo = form.billChallanNo.value.trim() || 'N/A';
+
+            if (isNaN(amount) || amount <= 0) {
+                 showMessage("Please enter a valid amount greater than zero.", 'error');
+                return;
+            }
+            if (!companyName || !method) {
+                 showMessage("Company name and Receiving Account are required.", 'error');
+                return;
+            }
+
+            try {
+                // 1. Company Ledger Adjustment (REDUCTION IN RECEIVABLE) - Deduction
+                const companyAdjustment = -amount;
+                const newCompanyBalance = await updateLedgerBalance('companyBalances', companyName, companyAdjustment);
+                
+                // 2. Cash Account Adjustment (ADDITION) - Money received
+                const cashAdjustment = amount;
+                await updateLedgerBalance('cashAccounts', method, cashAdjustment);
+                
+                // Log Company Transaction History (Payment Received)
+                const companyTransactionsColRef = collection(db, getCollectionPath('company_transactions'));
+                await addDoc(companyTransactionsColRef, {
+                    companyName: companyName,
+                    type: 'Payment Received',
+                    amount: companyAdjustment, // Negative amount as receivable decreased
+                    relatedChallan: challanNo,
+                    deliveryDate: new Date().toISOString().split('T')[0], // Use today's date as payment date
+                    method: method,
+                    timestamp: serverTimestamp(),
+                    currentBalance: newCompanyBalance,
+                    recordedByUserId: userId
+                });
+                
+                showMessage(`Successfully recorded BDT ${amount.toFixed(2)} payment from ${companyName}. BDT ${amount.toFixed(2)} added to ${method} balance.`, 'success');
+                form.reset();
+            } catch (e) {
+                console.error("Error recording bill payment: ", e);
+                showMessage("Failed to record bill payment: " + e.message, 'error');
+            }
+        }
+
+
+        // (showMessage and checkDealerBalance functions remain the same)
 
         const showMessage = (message, type) => {
             const msgBox = document.getElementById('message-box');
@@ -706,10 +923,49 @@
                 msgBox.style.display = 'none';
             }, 5000);
         };
+
+        window.checkDealerBalance = async () => {
+            const dealerName = document.getElementById('dealerName')?.value.trim() || document.getElementById('paymentDealerName')?.value.trim();
+            const balanceDisplay = document.getElementById('dealer-balance-display-report') || document.getElementById('dealer-balance-display-payment');
+            const currentBalanceSpan = balanceDisplay?.querySelector('#current-balance');
+
+            if (!dealerName || dealerName.length < 3 || !isAuthReady || !db || !balanceDisplay) {
+                if (balanceDisplay) balanceDisplay.classList.add('hidden');
+                return;
+            }
+
+            try {
+                const ledgerRef = getLedgerRef('dealerBalances', dealerName);
+                if (!ledgerRef) return;
+
+                const docSnap = await getDoc(ledgerRef);
+                const currentBalance = docSnap.exists() ? docSnap.data().balance : 0;
+                
+                currentBalanceSpan.textContent = `BDT ${currentBalance.toFixed(2)}`;
+                balanceDisplay.className = 'text-sm p-3 rounded-lg shadow-inner mt-2';
+                balanceDisplay.classList.remove('hidden');
+
+                if (currentBalance < 0) {
+                    balanceDisplay.classList.add('bg-red-50', 'text-red-800');
+                    balanceDisplay.querySelector('span:first-child').textContent = 'Due TO Dealer (You Owe):';
+                } else if (currentBalance > 0) {
+                    balanceDisplay.classList.add('bg-teal-50', 'text-teal-800');
+                    balanceDisplay.querySelector('span:first-child').textContent = 'Advance HELD (Dealer Owes):';
+                } else {
+                    balanceDisplay.classList.add('bg-gray-50', 'text-gray-600');
+                    balanceDisplay.querySelector('span:first-child').textContent = 'No Outstanding Balance:';
+                }
+
+            } catch (error) {
+                console.error("Error checking dealer balance:", error);
+                balanceDisplay.classList.add('hidden');
+            }
+        };
+
         
         // --- View Switching Logic ---
         window.switchView = (viewId) => {
-            const views = ['new-report', 'new-payment', 'reports', 'ledgers'];
+            const views = ['new-report', 'new-payment', 'receive-payment', 'reports', 'ledgers', 'cash-accounts'];
             views.forEach(id => {
                 document.getElementById(id).classList.add('hidden');
             });
@@ -723,14 +979,14 @@
 
             // Reset ledger view to summary when navigating away/to ledgers
             if (viewId === 'ledgers') {
-                window.showBoatmanLedgerSummary();
+                window.showDealerLedgerSummary();
                 window.showCompanyLedgerSummary();
             }
 
             // Ensure balance check runs on payment view load
             if (viewId === 'new-payment') {
-                document.getElementById('paymentBoatmanName').value = '';
-                document.getElementById('boatman-balance-display-payment').classList.add('hidden');
+                document.getElementById('paymentDealerName').value = '';
+                document.getElementById('dealer-balance-display-payment').classList.add('hidden');
             }
         }
 
@@ -738,8 +994,30 @@
             initializeFirebase();
             document.getElementById('report-form').addEventListener('submit', handleReportSubmit);
             document.getElementById('payment-form').addEventListener('submit', handlePaymentSubmission);
+            document.getElementById('bill-payment-form').addEventListener('submit', handleBillPayment);
+            document.getElementById('new-account-form').addEventListener('submit', handleCashAccountFormSubmit);
         });
     </script>
+
+    <!-- Start of Firebase Security Rules Instructions -->
+    <div class="fixed bottom-0 right-0 p-4 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 max-w-sm rounded-tl-lg shadow-2xl">
+        <p class="font-bold text-sm mb-1">🔥 Firestore Setup Required for PUBLIC DATA:</p>
+        <p class="text-xs">Since you requested a public ledger, all data is now stored in the public path. You MUST set your Firestore rules to grant read/write access to **all authenticated users** for this public data path.</p>
+        <p class="font-bold text-xs mt-2">Add the following rule to your Firebase Console > Firestore > Rules tab:</p>
+        <pre class="bg-yellow-200 p-2 mt-1 rounded text-xs font-mono whitespace-pre-wrap">
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // PUBLIC DATA PATH
+    match /artifacts/{appId}/public/data/{document=**} {
+      allow read, write: if request.auth != null; // Allows any authenticated user to read/write public data
+    }
+  }
+}
+        </pre>
+        <p class="text-xs mt-1">This rule ensures that any user who successfully signs in (even anonymously, which happens automatically) can access the public ledger data.</p>
+    </div>
+    <!-- End of Firebase Security Rules Instructions -->
 </head>
 <body class="min-h-screen">
 
@@ -748,20 +1026,26 @@
         <!-- Sidebar Navigation (Hamburger Menu equivalent) -->
         <nav class="w-full md:w-64 bg-slate-800 p-4 md:p-6 text-white shadow-xl flex flex-col justify-between">
             <div>
-                <h1 class="text-2xl font-extrabold text-teal-400 mb-6">Trade Console</h1>
+                <h1 class="text-2xl font-extrabold text-teal-400 mb-6">Trade Console (Public Ledger)</h1>
                 
                 <div class="space-y-2">
                     <button id="nav-new-report" onclick="switchView('new-report')" class="nav-item w-full text-left p-3 rounded-xl transition duration-150 hover:bg-slate-700 active-tab">
                         <span class="font-bold">1. New Sales Deduction</span>
                     </button>
                     <button id="nav-new-payment" onclick="switchView('new-payment')" class="nav-item w-full text-left p-3 rounded-xl transition duration-150 hover:bg-slate-700">
-                        <span class="font-bold">2. Record Boatman Advance</span>
+                        <span class="font-bold">2. Record Dealer Advance</span>
+                    </button>
+                    <button id="nav-receive-payment" onclick="switchView('receive-payment')" class="nav-item w-full text-left p-3 rounded-xl transition duration-150 hover:bg-slate-700">
+                        <span class="font-bold">3. Record Bill Payment</span>
                     </button>
                     <button id="nav-reports" onclick="switchView('reports')" class="nav-item w-full text-left p-3 rounded-xl transition duration-150 hover:bg-slate-700">
-                        <span class="font-bold">3. Transaction History</span>
+                        <span class="font-bold">4. Transaction History</span>
                     </button>
                     <button id="nav-ledgers" onclick="switchView('ledgers')" class="nav-item w-full text-left p-3 rounded-xl transition duration-150 hover:bg-slate-700">
-                        <span class="font-bold">4. Financial Ledgers</span>
+                        <span class="font-bold">5. Financial Ledgers</span>
+                    </button>
+                    <button id="nav-cash-accounts" onclick="switchView('cash-accounts')" class="nav-item w-full text-left p-3 rounded-xl transition duration-150 hover:bg-slate-700">
+                        <span class="font-bold">6. Bank & Cash Accounts</span>
                     </button>
                 </div>
             </div>
@@ -769,11 +1053,6 @@
             <div class="mt-8 pt-4 border-t border-slate-700">
                 <p class="text-xs text-slate-400">User ID (for data access):</p>
                 <p id="user-id-display" class="font-mono text-sm break-all">Loading...</p>
-                <p class="text-xs text-slate-400 mt-2">Accounts Tracked:</p>
-                <ul class="text-xs text-slate-300">
-                    <li>3 x Bank</li>
-                    <li>Bkash, Nagad</li>
-                </ul>
             </div>
         </nav>
 
@@ -783,13 +1062,13 @@
 
             <!-- 1. New Sales Deduction View (Wood Sold) -->
             <section id="new-report" class="max-w-4xl mx-auto">
-                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">1. New Sales Deduction Entry (Deduct Cost from Boatman Ledger)</h2>
+                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">1. New Sales Deduction Entry (Deduct Cost from Dealer Ledger)</h2>
                 <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl border-t-4 border-teal-600">
                     
-                    <form id="report-form" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <form id="report-form" class="grid grid-cols-1 gap-6">
 
                         <!-- Block 1: Basic Info & Destination -->
-                        <div class="md:col-span-2 grid grid-cols-1 sm:grid-cols-4 gap-4 border-b pb-4 mb-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
                             <input type="text" id="challanNo" name="challanNo" placeholder="Challan No." required
                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
                             <input type="date" id="date" name="date" required 
@@ -804,66 +1083,120 @@
                                 <option value="Super Board Mill">Super Board Mill</option>
                             </select>
                         </div>
-
-                        <!-- Block 2: Parties & Quantity -->
-                        <div class="space-y-4">
-                            <h3 class="font-semibold text-slate-600 text-lg">Parties & Quantity</h3>
-                            <input type="text" id="dealerName" name="dealerName" placeholder="Dealer's Name" required
-                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
-                            <input type="text" id="boatmanName" name="boatmanName" placeholder="Boatman's Name (Ledger Key)" required
-                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm" oninput="checkBoatmanBalance()">
-                            
-                            <!-- Boatman Balance Display -->
-                            <div id="boatman-balance-display-report" class="text-sm p-3 rounded-lg shadow-inner hidden border border-dashed">
-                                <span class="font-medium">Outstanding Balance:</span> <span id="current-balance" class="font-bold">BDT 0.00</span>
+                        
+                        <!-- Block 2: Dealer & Live Balance Check -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 border-b pb-4">
+                            <div>
+                                <input type="text" id="dealerName" name="dealerName" placeholder="Dealer's Name (Ledger Key)" required
+                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm" oninput="checkDealerBalance()">
+                                
+                                <!-- Dealer Balance Display -->
+                                <div id="dealer-balance-display-report" class="text-sm p-3 rounded-lg shadow-inner hidden border border-dashed">
+                                    <span class="font-medium">Outstanding Balance:</span> <span id="current-balance" class="font-bold">BDT 0.00</span>
+                                </div>
                             </div>
+                        </div>
 
-                            <select id="woodGrade" name="woodGrade" required
+                        <!-- Block 3: Multi-Item Entry -->
+                        <h3 class="font-bold text-lg text-slate-700 mt-2 border-b pb-2">Wood Items & Rates (BDT/kg)</h3>
+                        
+                        <!-- Item 1 -->
+                        <div class="grid grid-cols-4 gap-4 bg-gray-50 p-4 rounded-xl shadow-inner">
+                            <div class="col-span-4"><p class="text-sm font-semibold text-teal-700">Item 1 (QNT, Buy Rate, Sell Rate)</p></div>
+                            <select id="woodGrade1" name="woodGrade1" required
                                     class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm bg-white">
-                                <option value="" disabled selected>Select Wood Grade</option>
-                                <option value="Chamble">Chamble</option>
+                                <option value="Chamble" selected>Chamble</option>
                                 <option value="Meheguni">Meheguni</option>
                                 <option value="Rendi">Rendi</option>
+                                <option value="Other">Other</option>
                             </select>
-                            <input type="number" id="totalQuantityKg" name="totalQuantityKg" placeholder="Total Quantity (kg)" required min="1" step="0.01"
+                            <input type="number" id="totalQuantityKg1" name="totalQuantityKg1" placeholder="Quantity (kg)" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                            <input type="number" id="buyPricePerKg1" name="buyPricePerKg1" placeholder="Buy Rate" required min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                            <input type="number" id="sellPricePerKg1" name="sellPricePerKg1" placeholder="Sell Rate" required min="0" step="0.01" value="0"
                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
                         </div>
 
-                        <!-- Block 3: Rates (BDT/kg) -->
-                        <div class="space-y-4">
-                            <h3 class="font-semibold text-slate-600 text-lg">Rates (BDT/kg)</h3>
-                            <input type="number" id="buyPricePerKg" name="buyPricePerKg" placeholder="Buying Rate (per kg)" required min="0" step="0.01"
+                        <!-- Item 2 -->
+                        <div class="grid grid-cols-4 gap-4 bg-gray-50 p-4 rounded-xl shadow-inner">
+                            <div class="col-span-4"><p class="text-sm font-semibold text-teal-700">Item 2 (QNT, Buy Rate, Sell Rate)</p></div>
+                            <select id="woodGrade2" name="woodGrade2"
+                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm bg-white">
+                                <option value="Chamble" selected>Chamble</option>
+                                <option value="Meheguni">Meheguni</option>
+                                <option value="Rendi">Rendi</option>
+                                <option value="Other">Other</option>
+                            </select>
+                            <input type="number" id="totalQuantityKg2" name="totalQuantityKg2" placeholder="Quantity (kg)" min="0" step="0.01" value="0"
                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
-                            <input type="number" id="sellPricePerKg" name="sellPricePerKg" placeholder="Selling Rate (per kg)" required min="0" step="0.01"
+                            <input type="number" id="buyPricePerKg2" name="buyPricePerKg2" placeholder="Buy Rate" min="0" step="0.01" value="0"
                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
-                            <input type="number" id="boatmanCostPerKg" name="boatmanCostPerKg" placeholder="Boatman Delivery Rate (per kg)" required min="0" step="0.01"
+                            <input type="number" id="sellPricePerKg2" name="sellPricePerKg2" placeholder="Sell Rate" min="0" step="0.01" value="0"
                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
                         </div>
+
+                        <!-- Item 3 -->
+                        <div class="grid grid-cols-4 gap-4 bg-gray-50 p-4 rounded-xl shadow-inner">
+                            <div class="col-span-4"><p class="text-sm font-semibold text-teal-700">Item 3 (QNT, Buy Rate, Sell Rate)</p></div>
+                            <select id="woodGrade3" name="woodGrade3"
+                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm bg-white">
+                                <option value="Chamble" selected>Chamble</option>
+                                <option value="Meheguni">Meheguni</option>
+                                <option value="Rendi">Rendi</option>
+                                <option value="Other">Other</option>
+                            </select>
+                            <input type="number" id="totalQuantityKg3" name="totalQuantityKg3" placeholder="Quantity (kg)" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                            <input type="number" id="buyPricePerKg3" name="buyPricePerKg3" placeholder="Buy Rate" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                            <input type="number" id="sellPricePerKg3" name="sellPricePerKg3" placeholder="Sell Rate" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                        </div>
+
+                        <!-- Item 4 -->
+                        <div class="grid grid-cols-4 gap-4 bg-gray-50 p-4 rounded-xl shadow-inner">
+                            <div class="col-span-4"><p class="text-sm font-semibold text-teal-700">Item 4 (QNT, Buy Rate, Sell Rate)</p></div>
+                            <select id="woodGrade4" name="woodGrade4"
+                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm bg-white">
+                                <option value="Chamble" selected>Chamble</option>
+                                <option value="Meheguni">Meheguni</option>
+                                <option value="Rendi">Rendi</option>
+                                <option value="Other">Other</option>
+                            </select>
+                            <input type="number" id="totalQuantityKg4" name="totalQuantityKg4" placeholder="Quantity (kg)" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                            <input type="number" id="buyPricePerKg4" name="buyPricePerKg4" placeholder="Buy Rate" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                            <input type="number" id="sellPricePerKg4" name="sellPricePerKg4" placeholder="Sell Rate" min="0" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 transition shadow-sm">
+                        </div>
+
                         
                         <!-- Submit Button -->
-                        <div class="md:col-span-2 pt-6">
+                        <div class="pt-6">
                             <button type="submit"
                                     class="w-full py-3 px-6 bg-red-600 text-white font-bold text-lg rounded-xl hover:bg-red-700 transition duration-300 shadow-lg shadow-red-200 active:scale-[0.99] transform">
-                                <span class="mr-2">&#x2193;</span> Record Sale & Deduct Boatman Cost
+                                <span class="mr-2">&#x2193;</span> Record Sale & Deduct Dealer Cost
                             </button>
                         </div>
                     </form>
                 </div>
             </section>
 
-            <!-- 2. Record Boatman Advance View (New Section) -->
+            <!-- 2. Record Dealer Advance View -->
             <section id="new-payment" class="max-w-4xl mx-auto hidden">
-                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">2. Record Boatman Advance (Add to Ledger)</h2>
+                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">2. Record Dealer Advance (Add to Ledger & Deduct from Cash/Bank)</h2>
                 <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl border-t-4 border-green-600">
                     <form id="payment-form" class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
                         <div class="space-y-4 md:col-span-1">
-                            <input type="text" id="paymentBoatmanName" name="paymentBoatmanName" placeholder="Boatman's Name (Ledger Key)" required
+                            <input type="text" id="paymentDealerName" name="paymentDealerName" placeholder="Dealer's Name (Ledger Key)" required
                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500 transition shadow-sm" 
-                                   oninput="checkBoatmanBalance()">
+                                   oninput="checkDealerBalance()">
                             
-                            <!-- Boatman Balance Display for Payment -->
-                            <div id="boatman-balance-display-payment" class="text-sm p-3 rounded-lg shadow-inner hidden border border-dashed">
+                            <!-- Dealer Balance Display for Payment -->
+                            <div id="dealer-balance-display-payment" class="text-sm p-3 rounded-lg shadow-inner hidden border border-dashed">
                                 <span class="font-medium">Outstanding Balance:</span> <span id="current-balance" class="font-bold">BDT 0.00</span>
                             </div>
                         </div>
@@ -874,37 +1207,79 @@
                         </div>
                         
                         <div class="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <!-- Payment Method (Now tied to cashAccounts) -->
                             <select id="paymentMethod" name="paymentMethod" required
                                     class="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500 transition shadow-sm bg-white">
-                                <option value="" disabled selected>Select Payment Method</option>
-                                <option value="Cash">Cash</option>
-                                <option value="Bank 1">Bank 1</option>
-                                <option value="Bank 2">Bank 2</option>
-                                <option value="Bank 3">Bank 3</option>
-                                <option value="Bkash">Bkash</option>
-                                <option value="Nagad">Nagad</option>
+                                <option value="" disabled selected>Select Payment Source (Deducted From Here)</option>
+                                <!-- Options populated by JavaScript from cashAccounts -->
                             </select>
                             
                             <button type="submit"
                                     class="w-full py-3 px-6 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 transition duration-300 shadow-lg shadow-green-200 active:scale-[0.99] transform">
-                                <span class="mr-2">&#x2191;</span> Add Advance to Boatman Ledger
+                                <span class="mr-2">&#x2191;</span> Add Advance to Dealer Ledger
                             </button>
                         </div>
                     </form>
                 </div>
             </section>
             
-            <!-- 3. Transaction History View -->
+            <!-- 3. Record Bill Payment View (NEW) -->
+            <section id="receive-payment" class="max-w-4xl mx-auto hidden">
+                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">3. Record Bill Payment (Received from Company)</h2>
+                <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl border-t-4 border-indigo-600">
+                    <form id="bill-payment-form" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+                        <div class="space-y-4 md:col-span-1">
+                            <select id="billCompanyName" name="billCompanyName" required
+                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition shadow-sm bg-white">
+                                <option value="" disabled selected>Select Company Paid</option>
+                                <option value="Akij Group">Akij Group</option>
+                                <option value="RFL Group">RFL Group</option>
+                                <option value="Super Board Mill">Super Board Mill</option>
+                            </select>
+                        </div>
+
+                        <div class="space-y-4 md:col-span-1">
+                            <input type="text" id="billChallanNo" name="billChallanNo" placeholder="Related Challan No. (Optional)"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition shadow-sm">
+                        </div>
+
+                        <div class="space-y-4 md:col-span-1">
+                             <input type="number" id="billReceiveAmount" name="billReceiveAmount" placeholder="Amount Received (BDT)" required min="1" step="0.01"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition shadow-sm">
+                        </div>
+
+                        <div class="space-y-4 md:col-span-1">
+                            <!-- Receiving Account (Tied to cashAccounts) -->
+                            <select id="billReceiveMethod" name="billReceiveMethod" required
+                                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition shadow-sm bg-white">
+                                <option value="" disabled selected>Select Receiving Account (Added To Here)</option>
+                                <!-- Options populated by JavaScript from cashAccounts -->
+                            </select>
+                        </div>
+                        
+                        <div class="md:col-span-2 pt-4">
+                            <button type="submit"
+                                    class="w-full py-3 px-6 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-700 transition duration-300 shadow-lg shadow-indigo-200 active:scale-[0.99] transform">
+                                <span class="mr-2">&#x2193;</span> Record Payment Received
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+
+            <!-- 4. Transaction History View -->
             <section id="reports" class="max-w-4xl mx-auto hidden">
-                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">3. Transaction History</h2>
+                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">4. Transaction History</h2>
                 <div id="reports-history-container" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <p class="text-center p-8 text-gray-500">Loading reports...</p>
                 </div>
             </section>
 
-            <!-- 4. Financial Ledgers View -->
+            <!-- 5. Financial Ledgers View -->
             <section id="ledgers" class="max-w-4xl mx-auto hidden">
-                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">4. Financial Ledgers Overview</h2>
+                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">5. Financial Ledgers Overview</h2>
                 
                 <!-- Company Ledgers (Money Receivable) -->
                 <div id="company-ledger-section" class="mb-12">
@@ -914,25 +1289,51 @@
                         <p class="text-center p-4 col-span-full text-gray-500">Loading company ledgers...</p>
                     </div>
 
-                    <!-- Company Detail History Container (NEW) -->
+                    <!-- Company Detail History Container -->
                     <div id="company-detail-history" class="mt-10 hidden">
                         <!-- Content rendered by viewCompanyHistory -->
                     </div>
                 </div>
 
-                <!-- Boatman Ledgers (Advances/Dues) -->
-                <div id="boatman-ledger-section">
-                    <h3 class="text-2xl font-semibold mb-4 text-slate-700 border-l-4 border-teal-500 pl-3">Boatman Ledgers (Advances & Dues)</h3>
-                    <p class="text-sm text-gray-500 mb-4">Positive balance = Advance held (Boatman owes you). Negative balance = Due to Boatman (You owe them). Click "View Transaction History" for details!</p>
-                    <div id="boatman-ledgers-container" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                        <p class="text-center p-4 col-span-full text-gray-500">Loading boatman ledgers...</p>
+                <!-- Dealer Ledgers (Advances/Dues) -->
+                <div id="dealer-ledger-section">
+                    <h3 class="text-2xl font-semibold mb-4 text-slate-700 border-l-4 border-teal-500 pl-3">Dealer Ledgers (Advances & Dues)</h3>
+                    <p class="text-sm text-gray-500 mb-4">Positive balance = Advance held (Dealer owes you). Negative balance = Due to Dealer (You owe them). Click "View Transaction History" for details!</p>
+                    <div id="dealer-ledgers-container" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <p class="text-center p-4 col-span-full text-gray-500">Loading dealer ledgers...</p>
                     </div>
 
-                    <!-- Boatman Detail History Container (UPDATED ID) -->
-                    <div id="boatman-detail-history" class="mt-10 hidden">
-                        <!-- Content rendered by viewBoatmanHistory -->
+                    <!-- Dealer Detail History Container -->
+                    <div id="dealer-detail-history" class="mt-10 hidden">
+                        <!-- Content rendered by viewDealerHistory -->
                     </div>
                 </div>
+            </section>
+
+            <!-- 6. Bank & Cash Accounts View (NEW) -->
+            <section id="cash-accounts" class="max-w-4xl mx-auto hidden">
+                <h2 class="text-3xl font-bold mb-6 text-slate-800 border-b pb-2">6. Bank & Cash Accounts Balances</h2>
+                <p class="text-lg text-gray-600 mb-6">Money is deducted from these accounts when you pay an advance, and added when you receive a bill payment.</p>
+                
+                <h3 class="text-2xl font-semibold mb-4 text-slate-700 border-l-4 border-indigo-500 pl-3">Current Balances</h3>
+                <div id="cash-accounts-container" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <p class="text-center p-4 col-span-full text-gray-500">Loading cash accounts...</p>
+                </div>
+                
+                <h3 class="text-2xl font-semibold mb-4 text-slate-700 border-l-4 border-gray-400 pl-3 mt-10">Add New Account/Initial Balance</h3>
+                <div class="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                    <form id="new-account-form" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                         <input type="text" id="newAccountName" name="newAccountName" placeholder="Account Name (e.g., Bank 4, New Wallet)" required
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-gray-500 focus:border-gray-500 transition shadow-sm">
+                        <input type="number" id="initialBalance" name="initialBalance" placeholder="Initial Balance (BDT)" step="0.01" value="0"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-gray-500 focus:border-gray-500 transition shadow-sm">
+                        <button type="submit"
+                                class="py-3 px-6 bg-gray-600 text-white font-bold rounded-xl hover:bg-gray-700 transition duration-300 shadow-md">
+                            Add Account / Set Balance
+                        </button>
+                    </form>
+                </div>
+
             </section>
 
         </main>
